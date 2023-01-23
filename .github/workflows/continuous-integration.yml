@@ -1,0 +1,72 @@
+name: Continuous Integration
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "force-app/**"
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+jobs:
+  validate-package:
+    environment: Testing
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - name: Log Context
+        env:
+          GITHUB_CONTEXT: ${{ toJSON(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ">=16"
+
+      - name: Install Salesforce CLI & Plugins
+        run: |
+          sudo npm install -global sfdx-cli
+          echo y | sfdx plugins:install sfdx-git-delta
+          sfdx --version
+          sfdx plugins --core
+
+      - name: Create Server Key
+        run: |
+          mkdir keys
+          echo "${{ secrets.SALESFORCE_CERTIFICATE_KEY }}" > keys/server.key
+
+      - name: Authenticate Org
+        run: sfdx force:auth:jwt:grant --loglevel trace --clientid ${{ secrets.SALESFORCE_CONNECTED_APP_CONSUMER_KEY }} --jwtkeyfile keys/server.key --username ${{ vars.SALESFORCE_USERNAME }}.${{ vars.SANDBOX_NAME }} -r https://${{ vars.SALESFORCE_MY_DOMAIN_NAME }}--${{ vars.SANDBOX_NAME }}.sandbox.my.salesforce.com -a deployOrg
+
+      - name: Create Package & Destructive Changes
+        run: |
+          mkdir changed-sources
+          sfdx sgd:source:delta --api-version=56 --loglevel trace --to "HEAD" --from origin/${{ github.base_ref }} --output changed-sources/ --source force-app --ignore .forceignore
+
+      - name: Log Changed Source
+        run: |
+          echo package.xml
+          cat changed-sources/package/package.xml
+          echo
+          echo
+          echo destructiveChanges.xml
+          cat changed-sources/destructiveChanges/destructiveChanges.xml
+
+      - name: Validate Package
+        run: sfdx force:source:deploy --loglevel trace -u deployOrg --checkonly -l RunLocalTests --verbose -x changed-sources/package/package.xml --ignorewarnings --coverageformatters cobertura --resultsdir coverage
+
+      - name: Upload Code Coverage for Apex to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          flags: Apex
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
